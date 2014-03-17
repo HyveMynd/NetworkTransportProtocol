@@ -1,6 +1,8 @@
 package edu.cs4480.protocol.framework;
 
 import edu.cs4480.protocol.stats.NetStats;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class StudentNetworkSimulator extends NetworkSimulator
 {
@@ -86,6 +88,7 @@ public class StudentNetworkSimulator extends NetworkSimulator
     // these variables to send messages error free!  They can only hold
     // state information for A or B.
     // Also add any necessary methods (e.g. checksum of a String)
+	private static final Logger logger = LoggerFactory.getLogger(StudentNetworkSimulator.class.getName());
 	private boolean aSequence;
 	private int aCurrentSequence;
 	private boolean aIsTransmitting;
@@ -152,10 +155,9 @@ public class StudentNetworkSimulator extends NetworkSimulator
 	 */
 	private boolean isCorrupted(Packet pkt){
 		int checksum = getChecksum(pkt.getSeqnum(), pkt.getAcknum(), pkt.getPayload());
-		System.out.println(String.format("packet checksum: %d, checksum: %d",
-				pkt.getChecksum(), checksum));
+		logger.debug("packet checksum: {}, checksum: {}", pkt.getChecksum(), checksum);
 		int sum = pkt.getChecksum() + checksum;
-		System.out.println(String.format("sum is: %d", sum));
+		logger.debug("sum is: {}", sum);
 		return sum != -1;
 	}
 
@@ -167,6 +169,31 @@ public class StudentNetworkSimulator extends NetworkSimulator
 	 */
 	private boolean isAck(Packet pkt){
 		return pkt.getAcknum() == 1 && pkt.getSeqnum() == aCurrentSequence;
+	}
+
+	/**
+	 * Convenience method to do all necessary operations associated with packet transmission.
+	 * @param entity 0 for entity A, 1 for entity B
+	 * @param pkt the packet to transmit
+	 * @param startTimer true if the timer should start
+	 */
+	private void transmitPacket(int entity, Packet pkt, boolean startTimer){
+		toLayer3(entity, pkt);
+		stats.totalPkt();
+		if (startTimer){
+			startTimer(entity, aCountdown);
+		}
+	}
+
+	/**
+	 * Conevnience method to initialize a message for transmission.
+	 * @param msg the message to send
+	 * @return the packet ready for transmission
+	 */
+	private Packet initPacket(Message msg){
+		stats.transMsg();
+		aCurrentSequence = aSequence ? 1 : 0;
+		return toPacket(aCurrentSequence, msg);
 	}
 
 	// This is the constructor.  Don't touch!
@@ -187,22 +214,14 @@ public class StudentNetworkSimulator extends NetworkSimulator
     protected void aOutput(Message message)
     {
 		if (!aIsTransmitting){
-			stats.transMsg();
-			System.out.println("aOutput: data: " + message.getData());
 			aIsTransmitting = true;
-			// convert to packet
-			aCurrentSequence = aSequence ? 1 : 0;
-			Packet pkt = toPacket(aCurrentSequence, message);
-
-			// transmit packet
-			System.out.println("aOutput: packet: " + pkt.toString());
-			aCurrentPacket = pkt;
-			toLayer3(0, pkt);
-			startTimer(0, aCountdown);
-			stats.totalPkt();
+			logger.info("aOutput: received message: {}", message.getData());
+			aCurrentPacket = initPacket(message);
+			logger.info("aOutput: transmitting packet: {}",aCurrentPacket.toString());
+			transmitPacket(0, aCurrentPacket, true);
 		} else {
 			stats.dropMsg();
-			System.out.println("aOutput: Dropping message. Already transmitting. Message: " + message.getData());
+			logger.info("aOutput: Dropping message. Already transmitting. Message: {}", message.getData());
 		}
     }
     
@@ -213,29 +232,20 @@ public class StudentNetworkSimulator extends NetworkSimulator
     protected void aInput(Packet packet)
     {
 		stopTimer(0);
-		// check for corruption
-		System.out.println("aInput packet: " + packet.toString());
-
+		logger.debug("aInput packet: " + packet.toString());
 		if (isCorrupted(packet)){
-			// retransmit packet
+			logger.info("aInput: Received corrupt packet. Retransmitting.");
 			stats.corruptPkt();
-			System.out.println("aInput: Corrupt packet");
-			toLayer3(0, aCurrentPacket);
-			startTimer(0, aCountdown);
-			stats.totalPkt();
+			transmitPacket(0, aCurrentPacket, true);
 		} else {
-			System.out.println("aInput: No corrupt");
 			if (isAck(packet)){
-				System.out.println("aInput: Successful transfer!");
+				logger.info("aInput: Packet intact. Successful transfer.");
 				aSequence = !aSequence; // Change to next aSequence
 				aIsTransmitting = false;
-				return;
+			} else {
+				logger.info("aInput: Got Nack, retransmitting.");
+				transmitPacket(0, aCurrentPacket, true);
 			}
-			//retransmit otherwise
-			System.out.println("aInput: Got Nack retransmit.");
-			toLayer3(0, aCurrentPacket);
-			startTimer(0, aCountdown);
-			stats.totalPkt();
 		}
     }
     
@@ -245,13 +255,9 @@ public class StudentNetworkSimulator extends NetworkSimulator
     // for how the timer is started and stopped. 
     protected void aTimerInterrupt()
     {
-		System.out.println("aTimer: Timer interrupt");
 		stats.lostPkt();
-		// retransmit
-		System.out.println("aTimer: Lost packet. Retransmitting.");
-		toLayer3(0, aCurrentPacket);
-		stats.totalPkt();
-		startTimer(0, aCountdown);
+		logger.info("aTimer: Lost packet. Retransmitting");
+		transmitPacket(0, aCurrentPacket, true);
     }
     
     // This routine will be called once, before any of your other A-side 
@@ -275,26 +281,20 @@ public class StudentNetworkSimulator extends NetworkSimulator
     protected void bInput(Packet packet)
     {
 		// check corruption
-		System.out.println("bInput packet: " + packet.toString());
+		logger.debug("bInput packet: {}", packet.toString());
 		if (isCorrupted(packet)){
-			// send nack
+			logger.info("bInput: Corrupt Packet. Sending Nack.");
 			stats.corruptPkt();
-			System.out.println("bInput: Corrupt Packet. Sending Nack.");
-			toLayer3(1, createNack());
-			stats.totalPkt();
+			transmitPacket(1, createNack(), false);
 		} else {
-			System.out.println("bInput: Non-corrupt packet. Sending Ack.");
-
-			// send ack
-			toLayer3(1, createAck(packet.getSeqnum()));
-			stats.totalPkt();
-
+			logger.info("bInput: Packet ok. Sending Ack.");
+			transmitPacket(1, createAck(packet.getSeqnum()), false);
 			if (bPreviousSequence != packet.getSeqnum()){
-				System.out.println("bInput: New Message. Sending to layer 5");
-				toLayer5(1, packet.getPayload());
+				logger.info("bInput: New Message. Sending to layer 5");
 				bPreviousSequence = packet.getSeqnum();
+				toLayer5(1, packet.getPayload());
 			} else {
-				System.out.println("bInput: Duplicate message. Not resending to layer 5.");
+				logger.info("bInput: Duplicate message. Not resending to layer 5.");
 			}
 		}
     }
@@ -305,6 +305,7 @@ public class StudentNetworkSimulator extends NetworkSimulator
     // of entity B).
     protected void bInit()
     {
+		// init to the opposite to simulate ready to receive next packet
 		bPreviousSequence = aSequence ? 0 : 1;
     }
 }
