@@ -271,7 +271,7 @@ public class StudentNetworkSimulator extends NetworkSimulator
 		aIsTransmitting = false;
 		aCurrentSequence = 0;
 		aCurrentPacket = null;
-		aCountdown = 500;
+		aCountdown = 100;
 	}
     
     // This routine will be called whenever a packet sent from the B-side 
