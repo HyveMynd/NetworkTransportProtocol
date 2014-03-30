@@ -11,6 +11,7 @@ public class NetStats {
 	private int lostPackets;
 	private int corruptedPackets;
 	private int totalPackets;
+	private int deliveredMsgs;
 
 	private NetStats(){
 	}
@@ -42,17 +43,22 @@ public class NetStats {
 		totalPackets++;
 	}
 
+	public void msgDelivered(){
+		deliveredMsgs++;
+	}
+
 	public String getStats(){
 		return String.format(
 				"\n-==NET STATS==-\n" +
 				"Total Messages: %d\n" +
 				"Transmitted Messages: %d\n" +
 				"Dropped Messages: %d\n" +
+				"Delivered Messages: %d\n" +
 				"Total Packets: %d\n" +
 				"Lost Packets: %d\n" +
 				"Corrupted Packets: %d\n" +
 				"Percent Lost: %f\n" +
-				"Percent Corrupted: %f\n", (transmittedMsg + droppedMsgs), transmittedMsg, droppedMsgs,
+				"Percent Corrupted: %f\n", (transmittedMsg + droppedMsgs), transmittedMsg, droppedMsgs, deliveredMsgs,
 				totalPackets, lostPackets, corruptedPackets,
 				((double)lostPackets/(double)totalPackets) * 100f,
 				((double)corruptedPackets/(double)(totalPackets-lostPackets)) * 100f);

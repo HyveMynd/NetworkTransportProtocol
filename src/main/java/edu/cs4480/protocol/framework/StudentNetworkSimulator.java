@@ -1,8 +1,15 @@
 package edu.cs4480.protocol.framework;
 
+import com.sun.swing.internal.plaf.basic.resources.basic_es;
 import edu.cs4480.protocol.stats.NetStats;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.ArrayDeque;
+import java.util.Collections;
+import java.util.LinkedList;
+import java.util.Queue;
+import java.util.concurrent.ArrayBlockingQueue;
 
 public class StudentNetworkSimulator extends NetworkSimulator
 {
@@ -89,13 +96,16 @@ public class StudentNetworkSimulator extends NetworkSimulator
     // state information for A or B.
     // Also add any necessary methods (e.g. checksum of a String)
 	private static final Logger logger = LoggerFactory.getLogger(StudentNetworkSimulator.class.getName());
-	private boolean aSequence;
-	private int aCurrentSequence;
-	private boolean aIsTransmitting;
 	private Packet aCurrentPacket;
 	private NetStats stats;
 	private double aCountdown;
 	private int bPreviousSequence;
+	private int aWindowSize;
+	private int aMessageBufferSize;
+	private int aBase;
+	private int aNextSeqNum;
+	private Queue<Message> messageBuffer;
+	private Queue<Packet> windowBuffer;
 
 	/**
 	 * Creates a Packet from the message.
@@ -125,7 +135,7 @@ public class StudentNetworkSimulator extends NetworkSimulator
 	 * @return The newly created packet representing a NACK
 	 */
 	private Packet createNack(){
-		int seq = aSequence ? 0 : 1;
+		int seq = bPreviousSequence;
 		int ack = 1;
 		int check = getChecksum(seq, ack, "");
 		return new Packet(seq, ack, ~check);
@@ -155,9 +165,9 @@ public class StudentNetworkSimulator extends NetworkSimulator
 	 */
 	private boolean isCorrupted(Packet pkt){
 		int checksum = getChecksum(pkt.getSeqnum(), pkt.getAcknum(), pkt.getPayload());
-		logger.debug("packet checksum: {}, checksum: {}", pkt.getChecksum(), checksum);
+		logger.trace("packet checksum: {}, checksum: {}", pkt.getChecksum(), checksum);
 		int sum = pkt.getChecksum() + checksum;
-		logger.debug("sum is: {}", sum);
+		logger.trace("sum is: {}", sum);
 		return sum != -1;
 	}
 
@@ -168,7 +178,10 @@ public class StudentNetworkSimulator extends NetworkSimulator
 	 * @return True if the packet is an ACK
 	 */
 	private boolean isAck(Packet pkt){
-		return pkt.getAcknum() == 1 && pkt.getSeqnum() == aCurrentSequence;
+		if (pkt.getSeqnum() > aNextSeqNum){
+			throw new IllegalStateException("Sequence number is invalid.");
+		}
+		return pkt.getAcknum() == 1 && pkt.getSeqnum() >= aBase;
 	}
 
 	/**
@@ -186,14 +199,59 @@ public class StudentNetworkSimulator extends NetworkSimulator
 	}
 
 	/**
-	 * Conevnience method to initialize a message for transmission.
+	 * Convenience method to initialize a message for transmission.
 	 * @param msg the message to send
 	 * @return the packet ready for transmission
 	 */
 	private Packet initPacket(Message msg){
 		stats.transMsg();
-		aCurrentSequence = aSequence ? 1 : 0;
-		return toPacket(aCurrentSequence, msg);
+		Packet pkt = toPacket(aNextSeqNum, msg);
+		aNextSeqNum++;
+		return pkt;
+	}
+
+	/**
+	 * Determines whether room for a new packet exists in the window.
+	 * @return true if the window can accept a packet.
+	 */
+	private boolean windowHasRoom(){
+		return windowBuffer.size() < aWindowSize;
+	}
+
+	/**
+	 * Retransmits all packets in the current window.
+	 */
+	private void retransmitWindow(){
+		for (Packet pkt : windowBuffer){
+			logger.debug("Retransmitting packet: {}", pkt.toString());
+			transmitPacket(0, pkt, false);
+		}
+		startTimer(0, aCountdown);
+	}
+
+	/**
+	 * Move the transmission window according to the acknowledged packet.
+	 * @param pkt The packet to check for acknowledge and move window accordingly.
+	 */
+	private void moveWindow(Packet pkt){
+		int seqNum = pkt.getSeqnum();
+		if (windowBuffer.peek().getSeqnum() > pkt.getSeqnum()){
+			return; //ack for an old packet
+		}
+		Packet head = windowBuffer.poll();
+		while (head != null && head.getSeqnum() != seqNum){
+			head = windowBuffer.poll();
+		}
+		aBase = (head == null) ? aNextSeqNum : head.getSeqnum() + 1;
+	}
+
+	private void handleTimer(){
+		if (windowBuffer.size() > 1){
+			stopTimer(0);
+			startTimer(0, aCountdown);
+		} else {
+			stopTimer(0);
+		}
 	}
 
 	// This is the constructor.  Don't touch!
@@ -213,15 +271,18 @@ public class StudentNetworkSimulator extends NetworkSimulator
     // the receiving upper layer.
     protected void aOutput(Message message)
     {
-		if (!aIsTransmitting){
-			aIsTransmitting = true;
+		if (windowHasRoom()){
 			logger.info("aOutput: received message: {}", message.getData());
 			aCurrentPacket = initPacket(message);
+			windowBuffer.add(aCurrentPacket);
 			logger.info("aOutput: transmitting packet: {}",aCurrentPacket.toString());
-			transmitPacket(0, aCurrentPacket, true);
+			transmitPacket(0, aCurrentPacket, windowBuffer.size() == 1);
 		} else {
-			stats.dropMsg();
-			logger.info("aOutput: Dropping message. Already transmitting. Message: {}", message.getData());
+			logger.info("Window full. Buffering message");
+			if (!messageBuffer.offer(message)){
+				stats.dropMsg();
+				logger.info("aOutput: Dropping message. Message buffer is full. Message: {}", message.getData());
+			}
 		}
     }
     
@@ -231,20 +292,20 @@ public class StudentNetworkSimulator extends NetworkSimulator
     // sent from the B-side.
     protected void aInput(Packet packet)
     {
-		stopTimer(0);
+		handleTimer();
 		logger.debug("aInput packet: " + packet.toString());
 		if (isCorrupted(packet)){
 			logger.info("aInput: Received corrupt packet. Retransmitting.");
 			stats.corruptPkt();
-			transmitPacket(0, aCurrentPacket, true);
+			retransmitWindow();
 		} else {
 			if (isAck(packet)){
-				logger.info("aInput: Packet intact. Successful transfer.");
-				aSequence = !aSequence; // Change to next aSequence
-				aIsTransmitting = false;
+				logger.info("aInput: Got ACK moving window.");
+				moveWindow(packet);
+				logger.debug("aInput: Base: {}, NextSeqNum: {}", aBase, aNextSeqNum);
 			} else {
 				logger.info("aInput: Got Nack, retransmitting.");
-				transmitPacket(0, aCurrentPacket, true);
+				retransmitWindow();
 			}
 		}
     }
@@ -257,7 +318,7 @@ public class StudentNetworkSimulator extends NetworkSimulator
     {
 		stats.lostPkt();
 		logger.info("aTimer: Lost packet. Retransmitting");
-		transmitPacket(0, aCurrentPacket, true);
+		retransmitWindow();
     }
     
     // This routine will be called once, before any of your other A-side 
@@ -267,11 +328,14 @@ public class StudentNetworkSimulator extends NetworkSimulator
     protected void aInit()
     {
 		stats = NetStats.getInstance();
-		aSequence = false;
-		aIsTransmitting = false;
-		aCurrentSequence = 0;
 		aCurrentPacket = null;
-		aCountdown = 100;
+		aCountdown = 500;
+		aNextSeqNum = 1;
+		aBase = 1;
+		aWindowSize = 8;
+		aMessageBufferSize = 50;
+		messageBuffer = new ArrayBlockingQueue<Message>(aMessageBufferSize);
+		windowBuffer = new ArrayBlockingQueue<Packet>(aWindowSize);
 	}
     
     // This routine will be called whenever a packet sent from the B-side 
@@ -287,14 +351,18 @@ public class StudentNetworkSimulator extends NetworkSimulator
 			stats.corruptPkt();
 			transmitPacket(1, createNack(), false);
 		} else {
-			logger.info("bInput: Packet ok. Sending Ack.");
-			transmitPacket(1, createAck(packet.getSeqnum()), false);
-			if (bPreviousSequence != packet.getSeqnum()){
-				logger.info("bInput: New Message. Sending to layer 5");
+			if (bPreviousSequence == packet.getSeqnum() - 1){
+				logger.info("bInput: Packet ok. Sending ACK");
+				transmitPacket(1, createAck(packet.getSeqnum()), false);
+				logger.info("bInput: New Message. Sending to layer 5. Message: {}", packet.getPayload());
+				logger.debug(packet.toString());
 				bPreviousSequence = packet.getSeqnum();
 				toLayer5(1, packet.getPayload());
+				stats.msgDelivered();
 			} else {
-				logger.info("bInput: Duplicate message. Not resending to layer 5.");
+				logger.info("bInput: Packet is not next in sequence. Sending ACK for old packet. Not resending to layer 5.");
+				logger.debug("bInput: Out of order packet. SeqNum= Expected: {}, Actual: {}", bPreviousSequence + 1, packet.getSeqnum());
+//				transmitPacket(1, createNack(), false);
 			}
 		}
     }
@@ -306,6 +374,6 @@ public class StudentNetworkSimulator extends NetworkSimulator
     protected void bInit()
     {
 		// init to the opposite to simulate ready to receive next packet
-		bPreviousSequence = aSequence ? 0 : 1;
+		bPreviousSequence = 0;
     }
 }
