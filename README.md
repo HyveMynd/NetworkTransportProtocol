@@ -1,6 +1,8 @@
 NetworkTransportProtocol
 ========
 
+University of Utah CS4480 Network Programming Assignment. Spring 2014
+
 Usage:
 java -jar [jar-name]
 
